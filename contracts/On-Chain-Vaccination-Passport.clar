@@ -5,6 +5,9 @@
 (define-constant ERR_INVALID_VACCINE (err u103))
 (define-constant ERR_INVALID_DATE (err u104))
 (define-constant ERR_INVALID_DOSE (err u105))
+(define-constant ERR_REMINDER_NOT_FOUND (err u106))
+(define-constant ERR_REMINDER_ALREADY_SET (err u107))
+
 
 (define-data-var contract-owner principal CONTRACT_OWNER)
 
@@ -235,4 +238,105 @@
         total-vaccines: (get-patient-vaccine-count patient),
         patient-address: patient
     }
+)
+
+
+(define-map vaccination-reminders
+    {patient: principal, vaccine-id: uint}
+    {
+        next-dose-due: uint,
+        next-dose-number: uint,
+        reminder-interval: uint,
+        is-active: bool
+    }
+)
+
+(define-read-only (get-vaccination-reminder (patient principal) (vaccine-id uint))
+    (map-get? vaccination-reminders {patient: patient, vaccine-id: vaccine-id})
+)
+
+(define-read-only (is-vaccination-due (patient principal) (vaccine-id uint) (current-time uint))
+    (let (
+        (reminder (get-vaccination-reminder patient vaccine-id))
+    )
+    (match reminder
+        some-reminder (and 
+            (get is-active some-reminder)
+            (<= (get next-dose-due some-reminder) current-time)
+        )
+        false
+    ))
+)
+
+(define-read-only (get-days-until-due (patient principal) (vaccine-id uint) (current-time uint))
+    (let (
+        (reminder (get-vaccination-reminder patient vaccine-id))
+    )
+    (match reminder
+        some-reminder (if (get is-active some-reminder)
+            (if (>= current-time (get next-dose-due some-reminder))
+                u0
+                (- (get next-dose-due some-reminder) current-time)
+            )
+            u0
+        )
+        u0
+    ))
+)
+
+(define-public (set-vaccination-reminder
+    (patient principal)
+    (vaccine-id uint)
+    (next-dose-due uint)
+    (reminder-interval uint)
+)
+    (let (
+        (existing-reminder (get-vaccination-reminder patient vaccine-id))
+        (vaccine-info (unwrap! (get-vaccine-info vaccine-id) ERR_NOT_FOUND))
+        (current-doses (get-patient-doses-for-vaccine patient vaccine-id))
+        (required-doses (get required-doses vaccine-info))
+    )
+    (asserts! (is-authorized-provider tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (> next-dose-due u0) ERR_INVALID_DATE)
+    (asserts! (> reminder-interval u0) ERR_INVALID_DATE)
+    (asserts! (< current-doses required-doses) ERR_INVALID_DOSE)
+    (asserts! (is-none existing-reminder) ERR_REMINDER_ALREADY_SET)
+    
+    (map-set vaccination-reminders 
+        {patient: patient, vaccine-id: vaccine-id}
+        {
+            next-dose-due: next-dose-due,
+            next-dose-number: (+ current-doses u1),
+            reminder-interval: reminder-interval,
+            is-active: true
+        }
+    )
+    (ok true))
+)
+
+(define-public (complete-vaccination-reminder (patient principal) (vaccine-id uint))
+    (let (
+        (existing-reminder (unwrap! (get-vaccination-reminder patient vaccine-id) ERR_REMINDER_NOT_FOUND))
+        (vaccine-info (unwrap! (get-vaccine-info vaccine-id) ERR_NOT_FOUND))
+        (current-doses (get-patient-doses-for-vaccine patient vaccine-id))
+        (required-doses (get required-doses vaccine-info))
+        (next-dose-due (+ (get next-dose-due existing-reminder) (get reminder-interval existing-reminder)))
+        (next-dose-number (+ (get next-dose-number existing-reminder) u1))
+    )
+    (asserts! (is-authorized-provider tx-sender) ERR_UNAUTHORIZED)
+    
+    (if (<= next-dose-number required-doses)
+        (map-set vaccination-reminders 
+            {patient: patient, vaccine-id: vaccine-id}
+            (merge existing-reminder {
+                next-dose-due: next-dose-due,
+                next-dose-number: next-dose-number
+            })
+        )
+        (map-set vaccination-reminders 
+            {patient: patient, vaccine-id: vaccine-id}
+            (merge existing-reminder {is-active: false})
+        )
+    )
+    (ok true))
 )
