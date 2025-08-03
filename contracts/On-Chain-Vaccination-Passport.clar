@@ -8,6 +8,10 @@
 (define-constant ERR_REMINDER_NOT_FOUND (err u106))
 (define-constant ERR_REMINDER_ALREADY_SET (err u107))
 
+(define-constant ERR_CERTIFICATE_EXISTS (err u108))
+(define-constant ERR_CERTIFICATE_NOT_FOUND (err u109))
+(define-constant ERR_INVALID_CERTIFICATE (err u110))
+
 
 (define-data-var contract-owner principal CONTRACT_OWNER)
 
@@ -338,5 +342,96 @@
             (merge existing-reminder {is-active: false})
         )
     )
+    (ok true))
+)
+
+
+(define-map vaccination-certificates
+    (buff 32)
+    {
+        patient: principal,
+        vaccine-id: uint,
+        certificate-hash: (buff 32),
+        issue-date: uint,
+        expiry-date: uint,
+        issuer: principal,
+        certificate-type: (string-ascii 20),
+        is-valid: bool
+    }
+)
+
+(define-map patient-certificates principal (list 10 (buff 32)))
+
+(define-data-var certificate-nonce uint u0)
+
+(define-read-only (get-certificate (cert-id (buff 32)))
+    (map-get? vaccination-certificates cert-id)
+)
+
+(define-read-only (get-patient-certificates (patient principal))
+    (default-to (list) (map-get? patient-certificates patient))
+)
+
+(define-read-only (verify-certificate-hash (cert-id (buff 32)) (provided-hash (buff 32)))
+    (let (
+        (certificate (get-certificate cert-id))
+    )
+    (match certificate
+        some-cert (and 
+            (get is-valid some-cert)
+            (is-eq (get certificate-hash some-cert) provided-hash)
+        )
+        false
+    ))
+)
+
+(define-public (generate-vaccination-certificate
+    (patient principal)
+    (vaccine-id uint)
+    (certificate-type (string-ascii 20))
+    (validity-days uint)
+)
+    (let (
+        (vaccination-record (unwrap! (get-vaccination-record patient vaccine-id) ERR_NOT_FOUND))
+        (current-time (+ stacks-block-height u1))
+        (expiry-date (+ current-time validity-days))
+        (nonce (var-get certificate-nonce))
+        (cert-data (concat (unwrap-panic (to-consensus-buff? patient))
+                          (concat (unwrap-panic (to-consensus-buff? vaccine-id))
+                                 (unwrap-panic (to-consensus-buff? nonce)))))
+        (cert-id (keccak256 cert-data))
+        (cert-hash (keccak256 (concat cert-data (unwrap-panic (to-consensus-buff? current-time)))))
+        (patient-certs (get-patient-certificates patient))
+    )
+    (asserts! (is-authorized-provider tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (get is-valid vaccination-record) ERR_INVALID_VACCINE)
+    (asserts! (> validity-days u0) ERR_INVALID_DATE)
+    (asserts! (is-none (get-certificate cert-id)) ERR_CERTIFICATE_EXISTS)
+    
+    (map-set vaccination-certificates cert-id {
+        patient: patient,
+        vaccine-id: vaccine-id,
+        certificate-hash: cert-hash,
+        issue-date: current-time,
+        expiry-date: expiry-date,
+        issuer: tx-sender,
+        certificate-type: certificate-type,
+        is-valid: true
+    })
+    
+    (map-set patient-certificates patient (unwrap-panic (as-max-len? (append patient-certs cert-id) u10)))
+    (var-set certificate-nonce (+ nonce u1))
+    (ok {certificate-id: cert-id, certificate-hash: cert-hash}))
+)
+
+(define-public (revoke-certificate (cert-id (buff 32)))
+    (let (
+        (certificate (unwrap! (get-certificate cert-id) ERR_CERTIFICATE_NOT_FOUND))
+    )
+    (asserts! (or (is-eq tx-sender (var-get contract-owner))
+                  (is-eq tx-sender (get issuer certificate))) ERR_UNAUTHORIZED)
+    
+    (map-set vaccination-certificates cert-id 
+        (merge certificate {is-valid: false}))
     (ok true))
 )
