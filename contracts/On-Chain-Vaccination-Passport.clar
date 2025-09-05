@@ -12,6 +12,15 @@
 (define-constant ERR_CERTIFICATE_NOT_FOUND (err u109))
 (define-constant ERR_INVALID_CERTIFICATE (err u110))
 
+(define-constant ERR_BADGE_NOT_FOUND (err u111))
+(define-constant ERR_BADGE_ALREADY_EARNED (err u112))
+
+(define-constant BADGE_FIRST_DOSE u1)
+(define-constant BADGE_FULLY_VACCINATED u2)
+(define-constant BADGE_MULTI_VACCINE u3)
+(define-constant BADGE_EARLY_ADOPTER u4)
+(define-constant BADGE_BOOSTER_CHAMPION u5)
+
 
 (define-data-var contract-owner principal CONTRACT_OWNER)
 
@@ -434,4 +443,117 @@
     (map-set vaccination-certificates cert-id 
         (merge certificate {is-valid: false}))
     (ok true))
+)
+
+
+(define-map badge-registry
+    uint
+    {
+        name: (string-ascii 30),
+        description: (string-ascii 100),
+        criteria-type: (string-ascii 20),
+        criteria-value: uint,
+        icon: (string-ascii 50)
+    }
+)
+
+(define-map patient-badges
+    {patient: principal, badge-id: uint}
+    {
+        earned-date: uint,
+        vaccine-id: uint,
+        milestone-data: uint
+    }
+)
+
+(define-map patient-badge-count principal uint)
+
+(define-data-var badge-system-initialized bool false)
+
+(define-read-only (get-badge-info (badge-id uint))
+    (map-get? badge-registry badge-id)
+)
+
+(define-read-only (has-badge (patient principal) (badge-id uint))
+    (is-some (map-get? patient-badges {patient: patient, badge-id: badge-id}))
+)
+
+(define-read-only (get-patient-badge-count (patient principal))
+    (default-to u0 (map-get? patient-badge-count patient))
+)
+
+(define-read-only (get-badge-achievement (patient principal) (badge-id uint))
+    (map-get? patient-badges {patient: patient, badge-id: badge-id})
+)
+
+(define-private (initialize-badge-system)
+    (begin
+        (map-set badge-registry BADGE_FIRST_DOSE {
+            name: "First Dose Hero",
+            description: "Received your first vaccination dose",
+            criteria-type: "dose_count",
+            criteria-value: u1,
+            icon: "GOLD"
+        })
+        (map-set badge-registry BADGE_FULLY_VACCINATED {
+            name: "Fully Protected", 
+            description: "Completed full vaccination series",
+            criteria-type: "fully_vaccinated",
+            criteria-value: u1,
+            icon: "SHIELD"
+        })
+        (map-set badge-registry BADGE_MULTI_VACCINE {
+            name: "Multi-Vaccine Champion",
+            description: "Vaccinated against 3+ different diseases", 
+            criteria-type: "vaccine_types",
+            criteria-value: u3,
+            icon: "TROPHY"
+        })
+        (var-set badge-system-initialized true)
+    )
+)
+
+(define-private (award-badge (patient principal) (badge-id uint) (vaccine-id uint) (milestone-data uint))
+    (let (
+        (current-badge-count (get-patient-badge-count patient))
+    )
+    (if (not (has-badge patient badge-id))
+        (begin
+            (map-set patient-badges 
+                {patient: patient, badge-id: badge-id}
+                {
+                    earned-date: stacks-block-height,
+                    vaccine-id: vaccine-id,
+                    milestone-data: milestone-data
+                }
+            )
+            (map-set patient-badge-count patient (+ current-badge-count u1))
+            true
+        )
+        false
+    ))
+)
+
+(define-private (check-and-award-badges (patient principal) (vaccine-id uint))
+    (let (
+        (patient-vaccine-total (get-patient-vaccine-count patient))
+        (is-fully-vaxxed (is-fully-vaccinated patient vaccine-id))
+    )
+    (if (not (var-get badge-system-initialized)) (initialize-badge-system) true)
+    
+    (if (is-eq patient-vaccine-total u1)
+        (award-badge patient BADGE_FIRST_DOSE vaccine-id patient-vaccine-total)
+        true
+    )
+    
+    (if is-fully-vaxxed
+        (award-badge patient BADGE_FULLY_VACCINATED vaccine-id u1)
+        true
+    )
+    
+    (if (>= patient-vaccine-total u3)
+        (award-badge patient BADGE_MULTI_VACCINE vaccine-id patient-vaccine-total)
+        true
+    )
+    )
 )
