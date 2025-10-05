@@ -21,6 +21,10 @@
 (define-constant BADGE_EARLY_ADOPTER u4)
 (define-constant BADGE_BOOSTER_CHAMPION u5)
 
+(define-constant ERR_PERMISSION_DENIED (err u113))
+(define-constant ERR_PERMISSION_EXPIRED (err u114))
+(define-constant ERR_PERMISSION_NOT_FOUND (err u115))
+
 
 (define-data-var contract-owner principal CONTRACT_OWNER)
 
@@ -556,4 +560,81 @@
         true
     )
     )
+)
+
+
+(define-map vaccination-access-permissions
+    {patient: principal, accessor: principal, vaccine-id: uint}
+    {
+        granted-at: uint,
+        expires-at: uint,
+        can-view-details: bool,
+        can-verify-status: bool,
+        is-active: bool,
+        purpose: (string-ascii 50)
+    }
+)
+
+(define-map patient-active-permissions principal (list 20 principal))
+
+(define-read-only (get-access-permission (patient principal) (accessor principal) (vaccine-id uint))
+    (map-get? vaccination-access-permissions {patient: patient, accessor: accessor, vaccine-id: vaccine-id})
+)
+
+(define-read-only (has-valid-permission (patient principal) (accessor principal) (vaccine-id uint) (current-time uint))
+    (let (
+        (permission (get-access-permission patient accessor vaccine-id))
+    )
+    (match permission
+        some-perm (and
+            (get is-active some-perm)
+            (>= (get expires-at some-perm) current-time)
+        )
+        false
+    ))
+)
+
+(define-public (grant-vaccination-access
+    (accessor principal)
+    (vaccine-id uint)
+    (duration uint)
+    (can-view-details bool)
+    (can-verify-status bool)
+    (purpose (string-ascii 50))
+)
+    (let (
+        (current-time stacks-block-height)
+        (expiry-time (+ current-time duration))
+        (patient tx-sender)
+        (current-accessors (default-to (list) (map-get? patient-active-permissions patient)))
+    )
+    (asserts! (> duration u0) ERR_INVALID_DATE)
+    (asserts! (is-some (get-vaccination-record patient vaccine-id)) ERR_NOT_FOUND)
+    
+    (map-set vaccination-access-permissions
+        {patient: patient, accessor: accessor, vaccine-id: vaccine-id}
+        {
+            granted-at: current-time,
+            expires-at: expiry-time,
+            can-view-details: can-view-details,
+            can-verify-status: can-verify-status,
+            is-active: true,
+            purpose: purpose
+        }
+    )
+    (map-set patient-active-permissions patient 
+        (unwrap-panic (as-max-len? (append current-accessors accessor) u20)))
+    (ok true))
+)
+
+(define-public (revoke-vaccination-access (accessor principal) (vaccine-id uint))
+    (let (
+        (patient tx-sender)
+        (permission (unwrap! (get-access-permission patient accessor vaccine-id) ERR_PERMISSION_NOT_FOUND))
+    )
+    (map-set vaccination-access-permissions
+        {patient: patient, accessor: accessor, vaccine-id: vaccine-id}
+        (merge permission {is-active: false})
+    )
+    (ok true))
 )
