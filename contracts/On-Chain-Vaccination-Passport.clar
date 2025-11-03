@@ -25,6 +25,14 @@
 (define-constant ERR_PERMISSION_EXPIRED (err u114))
 (define-constant ERR_PERMISSION_NOT_FOUND (err u115))
 
+(define-constant ERR_INVALID_SEVERITY (err u116))
+(define-constant ERR_EVENT_ALREADY_REPORTED (err u117))
+(define-constant ERR_INVALID_EVENT_DATA (err u118))
+
+(define-constant SEVERITY_MILD u1)
+(define-constant SEVERITY_MODERATE u2)
+(define-constant SEVERITY_SEVERE u3)
+(define-constant SEVERITY_LIFE_THREATENING u4)
 
 (define-data-var contract-owner principal CONTRACT_OWNER)
 
@@ -637,4 +645,92 @@
         (merge permission {is-active: false})
     )
     (ok true))
+)
+
+(define-map adverse-events
+    (buff 32)
+    {
+        patient: principal,
+        vaccine-id: uint,
+        reporter: principal,
+        event-description: (string-ascii 200),
+        severity: uint,
+        onset-date: uint,
+        reported-date: uint,
+        outcome: (string-ascii 50),
+        is-verified: bool
+    }
+)
+
+(define-map vaccine-adverse-event-count
+    uint
+    {
+        total-reports: uint,
+        mild-count: uint,
+        moderate-count: uint,
+        severe-count: uint,
+        life-threatening-count: uint
+    }
+)
+
+(define-data-var adverse-event-nonce uint u0)
+
+(define-read-only (get-adverse-event (event-id (buff 32)))
+    (map-get? adverse-events event-id)
+)
+
+(define-read-only (get-vaccine-safety-stats (vaccine-id uint))
+    (default-to
+        {total-reports: u0, mild-count: u0, moderate-count: u0, severe-count: u0, life-threatening-count: u0}
+        (map-get? vaccine-adverse-event-count vaccine-id)
+    )
+)
+
+(define-public (report-adverse-event
+    (patient principal)
+    (vaccine-id uint)
+    (event-description (string-ascii 200))
+    (severity uint)
+    (onset-date uint)
+    (outcome (string-ascii 50))
+)
+    (let (
+        (nonce (var-get adverse-event-nonce))
+        (event-data (concat (unwrap-panic (to-consensus-buff? patient))
+                           (concat (unwrap-panic (to-consensus-buff? vaccine-id))
+                                  (unwrap-panic (to-consensus-buff? onset-date)))))
+        (event-id (keccak256 event-data))
+        (current-time stacks-block-height)
+        (current-stats (get-vaccine-safety-stats vaccine-id))
+    )
+    (asserts! (is-authorized-provider tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (is-some (get-vaccination-record patient vaccine-id)) ERR_NOT_FOUND)
+    (asserts! (and (>= severity SEVERITY_MILD) (<= severity SEVERITY_LIFE_THREATENING)) ERR_INVALID_SEVERITY)
+    (asserts! (> onset-date u0) ERR_INVALID_DATE)
+    (asserts! (is-none (get-adverse-event event-id)) ERR_EVENT_ALREADY_REPORTED)
+    
+    (map-set adverse-events event-id {
+        patient: patient,
+        vaccine-id: vaccine-id,
+        reporter: tx-sender,
+        event-description: event-description,
+        severity: severity,
+        onset-date: onset-date,
+        reported-date: current-time,
+        outcome: outcome,
+        is-verified: false
+    })
+    
+    (map-set vaccine-adverse-event-count vaccine-id
+        (merge current-stats {
+            total-reports: (+ (get total-reports current-stats) u1),
+            mild-count: (+ (get mild-count current-stats) (if (is-eq severity SEVERITY_MILD) u1 u0)),
+            moderate-count: (+ (get moderate-count current-stats) (if (is-eq severity SEVERITY_MODERATE) u1 u0)),
+            severe-count: (+ (get severe-count current-stats) (if (is-eq severity SEVERITY_SEVERE) u1 u0)),
+            life-threatening-count: (+ (get life-threatening-count current-stats) (if (is-eq severity SEVERITY_LIFE_THREATENING) u1 u0))
+        })
+    )
+    
+    (var-set adverse-event-nonce (+ nonce u1))
+    (ok event-id))
 )
